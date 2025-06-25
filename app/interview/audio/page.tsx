@@ -12,9 +12,11 @@ import {
     Video
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { getAuth } from "firebase/auth";
+import { app } from "@/lib/firebase";
+import Cookies from 'js-cookie';
+import axios from "axios";
 
-// Hardcoded UUID as requested
-const INTERVIEW_UUID = 'fasdf3459sdff';
 
 const questionAudios = [
     "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
@@ -32,58 +34,71 @@ const answerAudios = [
     "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3"
 ];
 
-const dummyQuestions = [
-    {
-        id: 1,
-        question: "In a fast-scaling SaaS company approaching Series C, how would you balance the need for rapid product development with the long-term architectural integrity and technical debt management?",
-        feedback: "While your answer is clear, it is not complete. As a CTO, you should also consider culture of the company...",
-        score: 71,
-        audioIndex: 0
-    },
-    {
-        id: 2,
-        question: "Give an example of a challenging project you completed. What were the obstacles, and how did you overcome them?",
-        feedback: "Good example, but try to quantify the impact more clearly...",
-        score: 85,
-        audioIndex: 1
-    },
-    {
-        id: 3,
-        question: "How would you handle a situation where the engineering team disagrees with the product team's priorities?",
-        feedback: "You need to show more leadership in aligning teams...",
-        score: 68,
-        audioIndex: 2
-    },
-    {
-        id: 4,
-        question: "Describe your approach to building and maintaining a high-performing engineering culture.",
-        feedback: "Consider discussing psychological safety and continuous learning...",
-        score: 79,
-        audioIndex: 3
-    },
-    {
-        id: 5,
-        question: "What metrics do you track to measure engineering productivity, and why?",
-        feedback: "Good start, but include more business outcome metrics...",
-        score: 82,
-        audioIndex: 4
-    }
-];
 
 export default function InterviewPage() {
+    const INTERVIEW_UUID = Cookies.get('active_interview_session');
+
     const router = useRouter();
-    const [questions, setQuestions] = useState(dummyQuestions);
     const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
     const [retryQuestionNo, setRetryQuestionNo] = useState(-1);
     const [autoPlayNext, setAutoPlayNext] = useState(false);
     const [isRecording, setIsRecording] = useState(false);
     const [message, setMessage] = useState('');
-    const [answers, setAnswers] = useState({});
     const [answeredQuestions, setAnsweredQuestions] = useState([]);
     const [cameraVisible, setCameraVisible] = useState(false);
     const [mediaRecorder, setMediaRecorder] = useState(null);
     const [audioChunks, setAudioChunks] = useState([]);
     const [showNextButton, setShowNextButton] = useState(false);
+    const [loadingFeedback, setLoadingFeedback] = useState<Record<number, boolean>>({});
+
+    const [questions, setQuestions] = useState<Array<{ id: number, [key: string]: any }>>([]);
+    const [jobRole, setJobRole] = useState("");
+
+    interface Answer {
+        text: string;
+        score?: number;
+        feedback?: string;
+        timestamp?: string;
+    }
+
+    const [answers, setAnswers] = useState<Record<number, Answer>>({});
+
+    useEffect(() => {
+        const auth = getAuth(app);
+
+        const unsubscribe = auth.onAuthStateChanged(async (user) => {
+            if (!user || !INTERVIEW_UUID) {
+                console.log("User not authenticated or missing interview ID");
+                return;
+            }
+
+            try {
+                const idToken = await user.getIdToken();
+
+                const response = await axios.get(`http://127.0.0.1:3010/interview/questions/${INTERVIEW_UUID}`, {
+                    headers: {
+                        Authorization: `Bearer ${idToken}`,
+                    },
+                });
+
+                // Ensure each question has a unique ID
+                const questionsWithIds = response.data.questions.map((q: any, index: number) => ({
+                    ...q,
+                    id: q.id !== undefined ? q.id : index // fallback to index if id is missing
+                }));
+
+                setQuestions(questionsWithIds);
+                setJobRole(response.data.job_role || "Interview");
+
+            } catch (err) {
+                console.error("Failed to load interview data:", err);
+            }
+        });
+
+        return () => unsubscribe();
+    }, [INTERVIEW_UUID]);
+
+
 
     // Track playing states for each question and answer
     const [playingStates, setPlayingStates] = useState({
@@ -164,19 +179,19 @@ export default function InterviewPage() {
 
     const getRecordingKey = (questionId) => {
         return `${INTERVIEW_UUID}_answer_${questionId}`;
-      };
+    };
 
     const saveRecording = (questionId, audioBlob) => {
         const recordings = JSON.parse(localStorage.getItem('voiceRecordings') || '{}');
         const recordingKey = getRecordingKey(questionId);
         recordings[recordingKey] = URL.createObjectURL(audioBlob);
         localStorage.setItem('voiceRecordings', JSON.stringify(recordings));
-      };
+    };
 
     const hasRecording = (questionId) => {
         const recordings = JSON.parse(localStorage.getItem('voiceRecordings') || '{}');
         return !!recordings[getRecordingKey(questionId)];
-      };
+    };
 
     const startRecording = async () => {
         try {
@@ -192,17 +207,19 @@ export default function InterviewPage() {
                 const audioBlob = new Blob(chunks, { type: 'audio/wav' });
                 const targetQuestionId = retryQuestionNo !== -1 ? retryQuestionNo : questions[currentQuestionIndex].id;
 
-                // Save with UUID-based key format
                 saveRecording(targetQuestionId, audioBlob);
 
-                // Update answer state (preserves any existing text answer)
+                // Update answer state to maintain object structure
                 setAnswers(prev => ({
                     ...prev,
-                    [targetQuestionId]: prev[targetQuestionId]
-                        ? prev[targetQuestionId].replace(' (Voice recorded)', '') + ' (Voice recorded)'
-                        : '(Voice recorded)'
+                    [targetQuestionId]: {
+                        ...prev[targetQuestionId],
+                        text: prev[targetQuestionId]?.text ?
+                            `${prev[targetQuestionId].text} (Voice recorded)` :
+                            '(Voice recorded)'
+                    }
                 }));
-              };
+            };
 
             recorder.start();
             setMediaRecorder(recorder);
@@ -229,39 +246,125 @@ export default function InterviewPage() {
         }
     };
 
-    const handleSend = () => {
+    // const handleSend = () => {
+    //     if (message.trim() === '') return;
+
+    //     const targetQuestionId = retryQuestionNo !== -1 ? retryQuestionNo : questions[currentQuestionIndex].id;
+
+    //     // Save the answer
+    //     const newAnswers = {
+    //         ...answers,
+    //         [targetQuestionId]: message
+    //     };
+    //     setAnswers(newAnswers);
+
+    //     // Mark question as answered if not a retry
+    //     if (retryQuestionNo === -1) {
+    //         const newAnsweredQuestions = [...answeredQuestions, targetQuestionId];
+    //         setAnsweredQuestions(newAnsweredQuestions);
+
+    //         // Show next button if auto-play is disabled
+    //         if (!autoPlayNext && currentQuestionIndex < questions.length - 1) {
+    //             setShowNextButton(true);
+    //         } else {
+    //             // Move to next question if available
+    //             if (currentQuestionIndex < questions.length - 1) {
+    //                 setCurrentQuestionIndex(currentQuestionIndex + 1);
+    //             }
+    //         }
+    //     } else {
+    //         // For retry, just reset the retry state
+    //         setRetryQuestionNo(-1);
+    //     }
+
+    //     setMessage('');
+    // };
+
+    const handleSend = async () => {
         if (message.trim() === '') return;
 
         const targetQuestionId = retryQuestionNo !== -1 ? retryQuestionNo : questions[currentQuestionIndex].id;
+        const currentQuestion = questions.find(q => q.id === targetQuestionId);
 
-        // Save the answer
-        const newAnswers = {
-            ...answers,
-            [targetQuestionId]: message
-        };
-        setAnswers(newAnswers);
+        try {
+            // Set loading state for this question
+            setLoadingFeedback(prev => ({ ...prev, [targetQuestionId]: true }));
 
-        // Mark question as answered if not a retry
-        if (retryQuestionNo === -1) {
-            const newAnsweredQuestions = [...answeredQuestions, targetQuestionId];
-            setAnsweredQuestions(newAnsweredQuestions);
+            const auth = getAuth(app);
+            const user = auth.currentUser;
+            if (!user) throw new Error("Not authenticated");
 
-            // Show next button if auto-play is disabled
-            if (!autoPlayNext && currentQuestionIndex < questions.length - 1) {
-                setShowNextButton(true);
-            } else {
-                // Move to next question if available
-                if (currentQuestionIndex < questions.length - 1) {
+            const idToken = await user.getIdToken();
+
+            // Show answer immediately
+            const tempAnswer = {
+                text: message,
+                score: 0,
+                feedback: "Loading feedback...",
+                timestamp: new Date().toISOString()
+            };
+
+            setAnswers(prev => ({
+                ...prev,
+                [targetQuestionId]: tempAnswer
+            }));
+
+            // Get evaluation from Gemini
+            const evalRes = await fetch("http://localhost:3010/interview/evaluate_interview_answer", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${idToken}`,
+                },
+                body: JSON.stringify({
+                    answer_text: message,
+                    question_text: currentQuestion.question,
+                    job_role: jobRole
+                })
+            });
+
+            const evaluation = await evalRes.json();
+
+            // Update with real feedback
+            const finalAnswer = {
+                text: message,
+                score: evaluation.score,
+                feedback: evaluation.feedback,
+                timestamp: new Date().toISOString()
+            };
+
+            setAnswers(prev => ({
+                ...prev,
+                [targetQuestionId]: finalAnswer
+            }));
+
+            // Clear loading state
+            setLoadingFeedback(prev => ({ ...prev, [targetQuestionId]: false }));
+
+            // Rest of your existing logic...
+            if (retryQuestionNo === -1) {
+                const newAnsweredQuestions = [...answeredQuestions, targetQuestionId];
+                setAnsweredQuestions(newAnsweredQuestions);
+
+                if (!autoPlayNext && currentQuestionIndex < questions.length - 1) {
+                    setShowNextButton(true);
+                } else if (currentQuestionIndex < questions.length - 1) {
                     setCurrentQuestionIndex(currentQuestionIndex + 1);
                 }
+            } else {
+                setRetryQuestionNo(-1);
             }
-        } else {
-            // For retry, just reset the retry state
-            setRetryQuestionNo(-1);
-        }
 
-        setMessage('');
+            setMessage('');
+
+        } catch (err) {
+            console.error("Error submitting answer:", err);
+            setLoadingFeedback(prev => ({ ...prev, [targetQuestionId]: false }));
+            alert("Failed to submit answer: " + err.message);
+        }
     };
+
+      
 
     const toggleAudio = (type, id, audioIndex) => {
         const audio = audioRefs.current[`${type}-${id}`];
@@ -339,10 +442,12 @@ export default function InterviewPage() {
     };
 
     const handleFinish = () => {
-        // Clear the interview data from localStorage when finished
-        localStorage.removeItem(`interview_${INTERVIEW_UUID}`);
+        // Clear all interview-related data
+        localStorage.removeItem('current_interview_data');
+        localStorage.removeItem(`interview_${INTERVIEW_UUID}_answers`);
+        Cookies.remove('active_interview_session');
         router.push('/');
-    };
+      };
 
     // Determine which questions to show
     const visibleQuestions = questions.filter((q, index) =>
@@ -386,7 +491,7 @@ export default function InterviewPage() {
                 </span>
             </div>
         );
-      };
+    };
     return (
         <div className='bg-white'>
             <div className="container mx-auto h-screen flex flex-col bg-white relative">
@@ -472,7 +577,9 @@ export default function InterviewPage() {
                                             </>
                                         )}
                                         <div className="text-base text-black pt-2">
-                                            {answers[q.id].replace(' (Voice recorded)', '')}
+                                            {typeof answers[q.id] === 'string'
+                                                ? answers[q.id].replace(' (Voice recorded)', '')
+                                                : answers[q.id].text?.replace(' (Voice recorded)', '')}
                                         </div>
                                     </div>
                                 </div>
@@ -481,24 +588,33 @@ export default function InterviewPage() {
                             {/* Feedback - Only show if answered */}
                             {answers[q.id] && (
                                 <div className="flex items-center space-x-4 pt-4 lg:ml-[10%]">
-                                    <CircularProgress score={q.score} />
+                                    <CircularProgress score={answers[q.id].score || 0} />
                                     <p className="text-sm text-gray-700 flex-1">
-                                        {q.feedback}
-                                    </p>
-                                    <button
-                                        onClick={() => handleRetryToggle(q.id)}
-                                        className={`flex items-center space-x-1 px-3 py-2 rounded-full ${retryQuestionNo === q.id ? 'bg-red-100 text-red-500' : 'bg-gray-100 text-black'}`}
-                                    >
-                                        {retryQuestionNo === q.id ? (
-                                            <X className="w-4 h-4" />
+                                        {loadingFeedback[q.id] ? (
+                                            <span className="flex items-center">
+                                                <span className="animate-pulse">Loading feedback...</span>
+                                                <span className="ml-2 inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-400 border-t-transparent"></span>
+                                            </span>
                                         ) : (
-                                            <RotateCcw className="w-4 h-4" />
+                                            answers[q.id].feedback || ''
                                         )}
-                                        <span className="text-sm">{retryQuestionNo === q.id ? 'Cancel' : 'Retry'}</span>
-                                    </button>
+                                    </p>
+                                    {!loadingFeedback[q.id] && (
+                                        <button
+                                            onClick={() => handleRetryToggle(q.id)}
+                                            className={`flex items-center space-x-1 px-3 py-2 rounded-full ${retryQuestionNo === q.id ? 'bg-red-100 text-red-500' : 'bg-gray-100 text-black'}`}
+                                        >
+                                            {retryQuestionNo === q.id ? (
+                                                <X className="w-4 h-4" />
+                                            ) : (
+                                                <RotateCcw className="w-4 h-4" />
+                                            )}
+                                            <span className="text-sm">{retryQuestionNo === q.id ? 'Cancel' : 'Retry'}</span>
+                                        </button>
+                                    )}
                                 </div>
                             )}
-
+                            
                             {/* Next Button - Show after feedback if autoPlayNext is false and not last question */}
                             {showNextButton && q.id === questions[currentQuestionIndex].id && (
                                 <div className="mt-8 flex justify-center">
@@ -604,7 +720,7 @@ export default function InterviewPage() {
                         {/* Retry Label */}
                         {retryQuestionNo !== -1 && (
                             <div className="text-center text-sm font-medium text-gray-600">
-                                Retrying for question {retryQuestionNo}
+                                Retrying for question {retryQuestionNo + 1}
                             </div>
                         )}
                         {retryQuestionNo == -1 && (
